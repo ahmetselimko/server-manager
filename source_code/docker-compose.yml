@@ -1,0 +1,54 @@
+services:
+  train:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: yapayzeka-autoscaler:latest
+    command: ["python", "train.py"]
+    environment:
+      - OPENAI_API_KEY
+      - GEMINI_API_KEY
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+
+  eval:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: yapayzeka-autoscaler:latest
+    command: ["python", "train.py", "--eval-only"]
+    environment:
+      - OPENAI_API_KEY
+      - GEMINI_API_KEY
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+
+  eval_llm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: yapayzeka-autoscaler:latest
+    command:
+      [
+        "python",
+        "train.py",
+        "--eval-only",
+        "--use-llm",
+        "--llm-model",
+        "gemini-2.5-flash",
+        "--llm-endpoint",
+        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "--llm-interval-ticks",
+        "120"
+      ]
+    environment:
+      - OPENAI_API_KEY
+      - GEMINI_API_KEY
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
