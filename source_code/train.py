@@ -439,7 +439,9 @@ def run_autoscaler_evaluation(fleet_factory,
                                lstm_seq_len: int = 24,
                                llm_advisor: Optional[LLMWorkloadAdvisor] = None,
                                llm_interval_ticks: int = 6):
-    """Gerçekçi autoscaler testi — 24 saatlik bir gün boyunca.
+    """[KULLANIMDAN KALDIRILDI — döngüsel değerlendirme; bkz. evaluate_policies.py]
+    Eski 24 saatlik autoscaler testi. Sunucu CPU'su modelin kendi tahminine
+    eşitlendiği için operasyonel sonuçları geçerli DEĞİLDİR; yalnızca kayıt için tutulur.
 
     rf_model_per_srv : {server_id → RandomForestRegressor}  (Phase 2'den)
     shared_lstm      : LSTMModel                             (Phase 3'ten)
@@ -602,8 +604,8 @@ def run_autoscaler_evaluation(fleet_factory,
          f"{(1-np.mean(lstm_power_log)/baseline_power)*100:.1f}%"),
         ("Konsolidasyon Sayısı",       rf_rep['consolidations'],           lstm_rep['consolidations']),
         ("Scale-out Sayısı",           rf_rep['scale_outs'],               lstm_rep['scale_outs']),
-        ("Toplam Tasarruf ($/saat)",   f"{rf_rep['total_cost_saved_per_hour_usd']:.4f}",
-                                       f"{lstm_rep['total_cost_saved_per_hour_usd']:.4f}"),
+        ("Kümülatif Tasarruf ($)",   f"{rf_rep['total_cost_saved_usd']:.4f}",
+                                       f"{lstm_rep['total_cost_saved_usd']:.4f}"),
         ("Son Aktif Sunucu",           rf_rep['current_active_servers'],   lstm_rep['current_active_servers']),
         ("Son Uyku Sunucu",            rf_rep['current_idle_servers'],     lstm_rep['current_idle_servers']),
     ]
@@ -794,20 +796,13 @@ def main(args=None):
     print("  ✓ GraphSAGE kaydedildi → models/graphsage.pkl")
 
     # ══════════════════════════════════════════
-    # PHASE 5: Autoscaler (24 saat)
+    # PHASE 5: Ölçekleme politikası değerlendirmesi
     # ══════════════════════════════════════════
-    scaler_results = run_autoscaler_evaluation(
-        fleet_factory=create_server_fleet,
-        rf_model_per_srv=rf_model_per_srv,
-        rf_wl_per_srv=rf_wl_per_srv,
-        shared_lstm=shared_lstm,
-        total_secs=3600 * CFG["autoscaler_hours"],
-        rf_lag_steps=CFG["rf_lag_steps"],
-        lstm_seq_len=CFG["lstm_seq_len"],
-        llm_advisor=llm_advisor,
-        llm_interval_ticks=getattr(args, "llm_interval_ticks", CFG["llm_interval_ticks"]),
-    )
-    all_results["autoscaler"] = scaler_results
+    # NOT: Eski run_autoscaler_evaluation() döngüseldi (sunucu CPU'su modelin kendi
+    # tahminine eşitleniyordu; yer-gerçeği talep yoktu). Politika karşılaştırması
+    # artık evaluate_policies.py ile yapılır:
+    #     python evaluate_policies.py
+    print_banner("Politika değerlendirmesi → python evaluate_policies.py")
 
     # ══════════════════════════════════════════
     # SONUÇ RAPORU
@@ -819,13 +814,6 @@ def main(args=None):
     for name, res in all_results.items():
         if "avg_mae" in res and res["avg_mae"] >= 0:
             print(f"  {name:<22} {res['avg_mae']:>10.3f} {res['avg_r2']:>10.4f}")
-
-    print(f"\n  Autoscaler (24 saatlik test):")
-    for mname, rep in scaler_results.items():
-        print(f"    [{mname.upper()}] Aktif={rep['active_avg']:.1f} | "
-              f"Güç={rep['power_avg']:.0f}W | "
-              f"Konsolide={rep['consolidations']} | "
-              f"Tasarruf=${rep['total_cost_saved_per_hour_usd']:.4f}/saat")
 
     with open("logs/training_results.json", "w", encoding="utf-8") as f:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
@@ -892,29 +880,9 @@ def eval_only(args=None):
         print("  [UYARI] models/graphsage.pkl bulunamadı — GraphSAGE atlandı.")
 
     # ── Autoscaler testi ───────────────────────────────────────
-    scaler_results = run_autoscaler_evaluation(
-        fleet_factory=create_server_fleet,
-        rf_model_per_srv=rf_model_per_srv,
-        rf_wl_per_srv=rf_wl_per_srv,
-        shared_lstm=shared_lstm,
-        total_secs=3600 * CFG["autoscaler_hours"],
-        rf_lag_steps=CFG["rf_lag_steps"],
-        lstm_seq_len=CFG["lstm_seq_len"],
-        llm_advisor=llm_advisor,
-        llm_interval_ticks=getattr(args, "llm_interval_ticks", CFG["llm_interval_ticks"]),
-    )
-
-    print_banner("Eval-Only Sonuçları")
-    for mname, rep in scaler_results.items():
-        print(f"  [{mname.upper()}] Aktif={rep['active_avg']:.1f} | "
-              f"Güç={rep['power_avg']:.0f}W | "
-              f"Konsolide={rep['consolidations']} | "
-              f"Tasarruf=${rep['total_cost_saved_per_hour_usd']:.4f}/saat")
-
-    with open("logs/eval_results.json", "w", encoding="utf-8") as f:
-        json.dump(scaler_results, f, indent=2, ensure_ascii=False)
-    print("\n  ✓ Eval sonuçları → logs/eval_results.json")
-    return scaler_results
+    # Eski döngüsel değerlendirme kaldırıldı; bkz. evaluate_policies.py
+    print_banner("Politika değerlendirmesi için: python evaluate_policies.py")
+    return None
 
 
 if __name__ == "__main__":

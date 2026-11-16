@@ -469,7 +469,7 @@ class AutoscalerEngine:
             "scale_outs"                   : len(scaleouts),
             "rebalances"                   : len(rebalances),
             "total_power_saved_w"          : round(total_power_saved, 2),
-            "total_cost_saved_per_hour_usd": round(cumulative_cost, 4),
+            "total_cost_saved_usd"         : round(cumulative_cost, 4),   # simülasyon süresince kümülatif $ (saatlik DEĞİL)
             "current_active_servers"       : sum(1 for s in self.fleet if s.is_active),
             "current_idle_servers"         : sum(1 for s in self.fleet if not s.is_active),
             # Utilization quality
