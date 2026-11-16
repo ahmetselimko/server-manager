@@ -38,27 +38,46 @@ Each policy runs with two server selectors: a greedy rps/W selector and the orig
 
 ```bash
 python evaluate_policies.py        # main comparison  -> logs/policy_comparison.json   (~4 min)
-python pareto_margin.py            # margin sweep / SLA–energy Pareto -> logs/pareto_margin.{json,png} (~7 min)
-python -m pytest tests -q          # 24 correctness tests (demand conservation, boot delay, no look-ahead, ...)
+python pareto_margin.py            # margin sweep / SLA–energy Pareto -> logs/pareto_margin.{json,png} (~10 min, 2 cores)
+python -m pytest tests -q          # 33 correctness tests (demand conservation, boot delay, no look-ahead, coverage, ...)
 ```
 
-**Key results (synthetic workload, greedy selector, 30 seeds)**
+**Forecasting + safety-margin methods**
 
-| At +1% energy vs. reactive baseline | SLA violations (% of ticks) |
-|---|---|
-| Reactive (HPA-like) | 2.41 |
-| Naive persistence + margin | 2.05 |
-| **Random Forest + margin** | **1.54** (−36% vs reactive, −25% vs naive; paired 95% CI excludes 0) |
-| Oracle (perfect forecast, +0.5% energy) | 0.02 |
+| Name | Point forecast | Safety margin |
+|---|---|---|
+| `naive` | last observed value | fixed q-quantile of validation residuals |
+| `rf` | Random Forest | fixed q-quantile |
+| `lin` | linear AR / ridge (coefficients learned from data) | fixed q-quantile |
+| **`linq`** | linear AR | **state-conditional margin**: per-τ gradient-boosted quantile regression on the residual (inputs: level, recent changes, AR "surprise", hour, workload), calibrated with conformalized quantile regression (CQR) |
 
-- To reach 1% SLA violations, Random Forest needs about 1.9 percentage points less extra energy than naive.
-- LSTM does not beat naive persistence at equal energy.
-- The original combinatorial optimiser uses 15–21% more energy than the greedy selector and causes about 5× more server wake-ups.
-- Most of the gap to the oracle is still open; closing it is ongoing work.
+**Key results (synthetic workload, greedy selector, 30 seeds × 7 days, paired 95% CIs vs `rf`)**
+
+| | `rf` | `lin` | **`linq`** | `linq` − `rf` |
+|---|---|---|---|---|
+| SLA violations at +3% energy | 1.25% | 1.16% | **0.86%** | −0.39 [−0.46, −0.33] |
+| SLA violations at +5% energy | 1.03% | 1.01% | **0.48%** | −0.55 [−0.61, −0.49] |
+| Extra energy to reach 1% SLA | +5.2% | +5.2% | **+2.6%** | −2.6 pts [−3.2, −2.0] |
+| Extra energy to reach 0.5% SLA | +10.4% | +11.1% | **+4.9%** | −5.6 pts [−6.1, −5.1] |
+
+**Reading the table**
+- **Conditional margin vs. the best fixed-margin method:** `linq` halves the extra energy needed for a 1% SLA target compared with the best fixed-margin method.
+- **Where the gain comes from:** almost entirely from the conditional margin. The linear forecaster alone (`lin`) is on par with RF.
+- **Untouched seeds:** results are the same on seeds that were never used during development (2005–2030).
+- **No look-ahead:** randomly corrupting the future never changes a decision (tested).
+
+**Baselines for context**
+- Reactive HPA-like scaling: 2.41% SLA violations.
+- Oracle (perfect forecast): 0.02% SLA violations at +0.5% energy.
+- LSTM does not beat naive persistence.
+- The original combinatorial optimiser uses 15–21% more energy than the greedy selector.
 
 ![SLA–energy Pareto](logs/pareto_margin.png)
 
-*Caveat:* the traffic generator re-draws its pattern every tick, so the harness holds regimes for about 1 hour and adds EMA inertia. Validation on a public cloud trace is planned.
+*Caveats:*
+- The traffic generator re-draws its pattern every tick, so the harness holds regimes for about 1 hour and adds EMA inertia.
+- Part of the conditional margin's advantage comes from regularities in the synthetic generator: switch probability varies by hour, and upward jump size depends on load level.
+- Validation on a public cloud trace (Azure VM traces) is the next step.
 
 ## Project Structure
 

@@ -126,6 +126,11 @@ def _wl_onehot(w: int) -> List[float]:
     return v
 
 
+def _tab_row(load: np.ndarray, wl: np.ndarray, k: int) -> List[float]:
+    """t anında bilinen tablo özellikleri: x[t..t-N+1], zaman, iş yükü."""
+    return load[k - N_LAGS + 1:k + 1][::-1].tolist() + _time_feats(k) + _wl_onehot(wl[k])
+
+
 def build_tabular(load: np.ndarray, wl: np.ndarray):
     """t anında bilinenlerle (x[t-N+1..t], zaman, iş yükü) → hedef max(x[t+1..t+H])."""
     X, y, idx = [], [], []
@@ -158,11 +163,10 @@ class Forecaster:
     def predict_at(self, load_hist: np.ndarray, wl_hist: np.ndarray, k: int) -> float:
         if self.kind == "naive":
             return float(load_hist[k])
-        if self.kind == "rf":
+        if self.kind in ("rf", "tab"):
             if k < N_LAGS - 1:
                 return float(load_hist[k])
-            lags = load_hist[k - N_LAGS + 1:k + 1][::-1].tolist()
-            x = np.array([lags + _time_feats(k) + _wl_onehot(wl_hist[k])], dtype=np.float32)
+            x = np.array([_tab_row(load_hist, wl_hist, k)], dtype=np.float32)
             return float(self.model.predict(x)[0])
         if k < self.seq_len - 1:
             return float(load_hist[k])
@@ -173,6 +177,15 @@ class Forecaster:
     def margin_at(self, q: float) -> float:
         """Doğrulama kalıntılarının q kantili (≥0) — pay taraması için."""
         return max(0.0, float(np.quantile(self.val_resid, q)))
+
+    def set_level(self, q: float):
+        """İşletme noktasını seç (sabit pay: doğrulama kalıntılarının q kantili)."""
+        self.level = q
+        self.margin = self.margin_at(q)
+
+    def margin_now(self, load_hist: np.ndarray, wl_hist: np.ndarray, k: int) -> float:
+        """t anındaki güvenlik payı. Sabit-pay tahmincilerde sabittir."""
+        return self.margin
 
     def calibrate(self, yv: np.ndarray, pv: np.ndarray, q: float = 0.90):
         resid = yv - pv                      # pozitif → eksik tahmin (tehlikeli taraf)
@@ -185,8 +198,112 @@ class Forecaster:
                             "margin_q90": self.margin}
 
 
+class LinearAR:
+    """Ridge regresyon nokta tahmincisi (numpy ile hızlı tahmin).
+    G3 teşhisi: rejim değişimi olmayan tick'lerde yük ≈ AR(2); ağaçlar doğrusal
+    ekstrapolasyonu iyi temsil edemez. Katsayılar tamamen veriden öğrenilir."""
+
+    def __init__(self, alpha: float = 1e-3):
+        from sklearn.linear_model import Ridge
+        self._m = Ridge(alpha=alpha)
+
+    def fit(self, X, y):
+        self._m.fit(X, y)
+        self.coef_, self.intercept_ = self._m.coef_.astype(float), float(self._m.intercept_)
+        return self
+
+    def predict(self, X):
+        return np.asarray(X, dtype=float) @ self.coef_ + self.intercept_
+
+
+def fit_ar2(load: np.ndarray):
+    """x[t] ≈ a·x[t-1] + b·x[t-2] katsayılarını eğitim verisinden kestirir (EKK)."""
+    A = np.column_stack([load[1:-1], load[:-2]])
+    a, b = np.linalg.lstsq(A, load[2:], rcond=None)[0]
+    return float(a), float(b)
+
+
+def _state_feats(load: np.ndarray, k: int, ar2) -> List[float]:
+    """Belirsizlik payı için durum özellikleri (yalnızca t ve öncesi):
+    seviye, son iki değişim, AR(2) 'sürpriz'i (rejim değişimi göstergesi)."""
+    a, b = ar2
+    x0, x1, x2 = load[k], load[k - 1], load[k - 2]
+    x3 = load[k - 3]
+    surprise  = x0 - (a * x1 + b * x2)
+    surprise1 = x1 - (a * x2 + b * x3)
+    return [x0, x0 - x1, x1 - x2, surprise, abs(surprise), surprise1, abs(surprise1)]
+
+
+class ConditionalMarginForecaster(Forecaster):
+    """Nokta tahminci (LinearAR) + duruma koşullu kantil payı.
+    Her τ için, nokta tahmincinin kalıntısının τ-kantilini HistGradientBoosting
+    (loss='quantile') ile duruma (seviye, değişim, sürpriz, saat, iş yükü) bağlı
+    olarak tahmin eder. set_level(τ) işletme noktasını seçer."""
+
+    def __init__(self, name: str, base: Forecaster, ar2, taus: List[float]):
+        super().__init__(name, base.model, "tab")
+        self.base, self.ar2, self.taus = base, ar2, list(taus)
+        self.qmodels: Dict[float, object] = {}
+        self.coverage: Dict[float, float] = {}
+        self.level = 0.90
+
+    def _feat(self, load, wl, k) -> List[float]:
+        return _state_feats(load, k, self.ar2) + _time_feats(k) + _wl_onehot(wl[k])
+
+    def fit_margins(self, load, wl, idx_tr, resid_tr, idx_cal, resid_cal, idx_va, resid_va):
+        """τ başına kantil modeli eğitir; ardından ayrı bir kalibrasyon diliminde
+        konformal kaydırma (CQR) uygular ve kapsamayı dokunulmamış doğrulamada ölçer."""
+        from sklearn.ensemble import HistGradientBoostingRegressor
+        F_tr  = np.array([self._feat(load, wl, k) for k in idx_tr])
+        F_cal = np.array([self._feat(load, wl, k) for k in idx_cal])
+        F_va  = np.array([self._feat(load, wl, k) for k in idx_va])
+        self.shift: Dict[float, float] = {}
+        self.coverage_raw: Dict[float, float] = {}
+        for tau in self.taus:
+            m = HistGradientBoostingRegressor(loss="quantile", quantile=tau, **HGB_PARAMS)
+            m.fit(F_tr, resid_tr)
+            self.qmodels[tau] = m
+            # CQR: kalibrasyon dilimindeki aşımın τ kantili kadar kaydır
+            n_cal = len(resid_cal)
+            lvl = min(1.0, np.ceil((n_cal + 1) * tau) / n_cal)
+            self.shift[tau] = float(np.quantile(resid_cal - m.predict(F_cal), lvl))
+            pred_va = m.predict(F_va)
+            self.coverage_raw[tau] = float(np.mean(resid_va <= pred_va))
+            self.coverage[tau] = float(np.mean(resid_va <= pred_va + self.shift[tau]))
+        self.val_resid = resid_va
+
+    def set_level(self, q: float):
+        tau = min(self.taus, key=lambda t: abs(t - q))
+        assert abs(tau - q) < 1e-9, f"τ={q} kantil ızgarasında yok: {self.taus}"
+        self.level = tau
+        self.margin = float("nan")      # sabit pay yok; margin_now kullanılır
+
+    def _precompute(self, load_hist, wl_hist):
+        """Tüm tick'ler için τ başına payı toplu hesaplar. Satır k yalnızca x[≤k]
+        kullandığından (bkz. _state_feats) bu bir gelecek sızıntısı DEĞİLDİR; sadece hız."""
+        n = len(load_hist)
+        F = np.array([self._feat(load_hist, wl_hist, k) for k in range(3, n)])
+        self._cache = {}
+        for tau, m in self.qmodels.items():
+            arr = np.full(n, max(0.0, float(np.quantile(self.val_resid, tau))))
+            arr[3:] = np.maximum(0.0, m.predict(F) + self.shift[tau])
+            self._cache[tau] = arr
+        self._cache_src = (load_hist, wl_hist)
+
+    def margin_now(self, load_hist, wl_hist, k) -> float:
+        src = getattr(self, "_cache_src", (None, None))
+        if src[0] is not load_hist or src[1] is not wl_hist:
+            self._precompute(load_hist, wl_hist)
+        return float(self._cache[self.level][k])
+
+
+HGB_PARAMS = dict(max_iter=200, learning_rate=0.05, max_leaf_nodes=15, min_samples_leaf=40,
+                  random_state=0)
+COND_TAUS = [0.50, 0.60, 0.70, 0.80, 0.85, 0.90, 0.95, 0.975, 0.99]
+
+
 def train_forecasters(train_seed: int, train_days: float, use_lstm: bool,
-                      n_servers: int) -> List[Forecaster]:
+                      n_servers: int, use_rf: bool = True) -> List[Forecaster]:
     tr = generate_trace(train_seed, train_days, n_servers)
     load, wl = tr["load"], tr["wl"]
     split = int(len(load) * 0.8)
@@ -196,19 +313,52 @@ def train_forecasters(train_seed: int, train_days: float, use_lstm: bool,
     X, y, _ = build_tabular(load, wl)
     cut = int(len(X) * 0.8)
 
-    t0 = time.time()
-    rf = RandomForestRegressor(n_estimators=40, max_depth=10, max_features=8, rng_seed=1)
-    rf.fit(X[:cut], y[:cut])
-    f_rf = Forecaster("rf", rf, "rf")
-    f_rf.calibrate(y[cut:], rf.predict(X[cut:]))
     f_naive = Forecaster("naive", None, "naive")
     f_naive.calibrate(y[cut:], X[cut:, 0])
     out.append(f_naive)
-    naive_mae = f_naive.val_metrics["mae"]
-    print(f"  RF   eğitildi ({time.time()-t0:.0f}s) | val MAE={f_rf.val_metrics['mae']:.4f} "
-          f"R²={f_rf.val_metrics['r2']:.3f} | naive MAE={naive_mae:.4f} "
-          f"| pay(q90)={f_rf.margin:.4f}")
-    out.append(f_rf)
+    if use_rf:
+        t0 = time.time()
+        rf = RandomForestRegressor(n_estimators=40, max_depth=10, max_features=8, rng_seed=1)
+        rf.fit(X[:cut], y[:cut])
+        f_rf = Forecaster("rf", rf, "rf")
+        f_rf.calibrate(y[cut:], rf.predict(X[cut:]))
+        print(f"  RF   eğitildi ({time.time()-t0:.0f}s) | val MAE={f_rf.val_metrics['mae']:.4f} "
+              f"R²={f_rf.val_metrics['r2']:.3f} | naive MAE={f_naive.val_metrics['mae']:.4f} "
+              f"| pay(q90)={f_rf.margin:.4f}")
+        out.append(f_rf)
+
+    # G3-1: doğrusal AR / ridge nokta tahminci
+    t0 = time.time()
+    lin = LinearAR().fit(X[:cut], y[:cut])
+    f_lin = Forecaster("lin", lin, "tab")
+    f_lin.calibrate(y[cut:], lin.predict(X[cut:]))
+    out.append(f_lin)
+    print(f"  LIN  eğitildi ({time.time()-t0:.1f}s) | val MAE={f_lin.val_metrics['mae']:.4f} "
+          f"R²={f_lin.val_metrics['r2']:.3f} | pay(q90)={f_lin.margin:.4f}")
+
+    # G3-2: LIN + duruma koşullu kantil payı
+    t0 = time.time()
+    _, _, idx = build_tabular(load, wl)
+    idx = np.array(idx)
+    ar2 = fit_ar2(load[:idx[cut]])              # yalnızca eğitim bölümü
+    resid = y - lin.predict(X)
+    f_q = ConditionalMarginForecaster("linq", f_lin, ar2, COND_TAUS)
+    c70 = int(len(X) * 0.7)                    # kantil eğitimi %0-70, CQR %70-80, doğrulama %80-100
+    f_q.fit_margins(load, wl, idx[:c70], resid[:c70], idx[c70:cut], resid[c70:cut],
+                    idx[cut:], resid[cut:])
+    f_q.val_metrics = dict(f_lin.val_metrics, ar2=list(ar2),
+                           coverage={str(t): c for t, c in f_q.coverage.items()},
+                           coverage_raw={str(t): c for t, c in f_q.coverage_raw.items()},
+                           cqr_shift={str(t): v for t, v in f_q.shift.items()})
+    f_q.set_level(0.90)
+    out.append(f_q)
+    cov = " ".join(f"{t:g}:{f_q.coverage_raw[t]:.3f}→{c:.3f}" for t, c in f_q.coverage.items())
+    print(f"  LINQ eğitildi ({time.time()-t0:.0f}s) | AR(2)=({ar2[0]:.3f},{ar2[1]:.3f}) "
+          f"| val kapsama τ→oran: {cov}")
+
+    for f in out:
+        if f.kind != "tab" or f.name == "lin":
+            f.set_level(0.90)
 
     if use_lstm:
         seq_len = 12
@@ -341,7 +491,8 @@ def simulate(policy: str, trace: Dict, forecaster: Optional[Forecaster] = None,
                 fut = demand[k + 1:k + 1 + HORIZON]
                 req = float(fut.max()) if len(fut) else d
             else:
-                x_hat = forecaster.predict_at(load, wl, k) + forecaster.margin
+                x_hat = (forecaster.predict_at(load, wl, k)
+                         + forecaster.margin_now(load, wl, k))
                 req = max(x_hat, 0.0) * DEMAND_SCALE * cap_total
             target = (select_greedy(avail, req) if selector == "greedy"
                       else select_optimal(avail, req, dom_wl))

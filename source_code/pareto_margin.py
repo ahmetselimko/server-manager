@@ -21,12 +21,14 @@ Yöntem
 
 Kullanım:
   python pareto_margin.py                  # 30 seed × 7 gün (çok çekirdekli)
-  python pareto_margin.py --seeds 4 --days 2 --no-lstm   # hızlı deneme
+  python pareto_margin.py --seeds 4 --days 2   # hızlı deneme
+  python pareto_margin.py --with-lstm          # LSTM dahil
 """
 
+import os
+os.environ.setdefault("OMP_NUM_THREADS", "1")   # sklearn HGB + çoklu süreç → çekirdek çakışmasını önle
 import argparse
 import json
-import os
 from multiprocessing import Pool
 from pathlib import Path
 from typing import Dict, List
@@ -40,6 +42,7 @@ QUANTILES      = [0.50, 0.60, 0.70, 0.80, 0.85, 0.90, 0.95, 0.975, 0.99]
 ENERGY_LEVELS  = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0]      # ΔEnerji % (eş enerji)
 SLA_LEVELS     = [1.5, 1.0, 0.75, 0.5]                      # SLA % (eş SLA)
 N_BOOT         = 2000
+BASELINES      = ["naive", "rf"]                            # eşleştirilmiş fark tabanları
 
 _G: Dict = {}   # çalışan süreçlerde paylaşılan tahminciler
 
@@ -58,9 +61,9 @@ def _run_seed(args):
     for name, f in _G["f"].items():
         pts = []
         for q in QUANTILES:
-            f.margin = f.margin_at(q)
+            f.set_level(q)
             r = ep.simulate(f"{name}_greedy", tr, f)
-            pts.append({"q": q, "margin": f.margin, "energy_kwh": r["energy_kwh"],
+            pts.append({"q": q, "margin": (None if np.isnan(f.margin) else f.margin), "energy_kwh": r["energy_kwh"],
                         "sla_violation_pct": r["sla_violation_pct"],
                         "dropped_req_pct": r["dropped_req_pct"],
                         "wakeups": r["wakeups"]})
@@ -118,8 +121,10 @@ def analyse(per_seed: List[Dict], methods: List[str]) -> Dict:
         both = np.all([np.isfinite(v) for v in vals.values()], axis=0)   # tüm yöntemlerde tanımlı seed'ler
         row = {m: (float(v[both].mean()) if both.any() else None) for m, v in vals.items()}
         row["n_seeds_common"] = int(both.sum())
-        row["diff_vs_naive"] = {m: _paired(vals[m], vals["naive"], rng)
-                                for m in methods if m != "naive"}
+        row["n_censored"] = {m: int((~np.isfinite(v)).sum()) for m, v in vals.items()}
+        for base in BASELINES:
+            row[f"diff_vs_{base}"] = {m: _paired(vals[m], vals[base], rng)
+                                      for m in methods if m != base}
         iso_energy[str(lvl)] = row
 
     iso_sla = {}
@@ -129,8 +134,10 @@ def analyse(per_seed: List[Dict], methods: List[str]) -> Dict:
         both = np.all([np.isfinite(v) for v in vals.values()], axis=0)   # tüm yöntemlerde tanımlı seed'ler
         row = {m: (float(v[both].mean()) if both.any() else None) for m, v in vals.items()}
         row["n_seeds_common"] = int(both.sum())
-        row["diff_vs_naive"] = {m: _paired(vals[m], vals["naive"], rng)
-                                for m in methods if m != "naive"}
+        row["n_censored"] = {m: int((~np.isfinite(v)).sum()) for m, v in vals.items()}
+        for base in BASELINES:
+            row[f"diff_vs_{base}"] = {m: _paired(vals[m], vals[base], rng)
+                                      for m in methods if m != base}
         iso_sla[str(lvl)] = row
 
     ref = {
@@ -145,9 +152,13 @@ def analyse(per_seed: List[Dict], methods: List[str]) -> Dict:
 
 
 # ── Grafik ────────────────────────────────────────────────────────────────────
-COLORS  = {"naive": "#2a78d6", "rf": "#eb6834", "lstm": "#1baf7a"}   # doğrulanmış kategorik
-MARKERS = {"naive": "o", "rf": "s", "lstm": "^"}
-LABELS  = {"naive": "Son değer + pay", "rf": "Random Forest + pay", "lstm": "LSTM + pay"}
+# Kategorik paletin sabit sıradaki slotları (validate_palette.js ile doğrulandı)
+COLORS  = {"naive": "#2a78d6", "rf": "#eb6834", "lin": "#1baf7a", "linq": "#6250d6",
+           "lstm": "#e87ba4"}
+MARKERS = {"naive": "o", "rf": "s", "lin": "^", "linq": "D", "lstm": "v"}
+LABELS  = {"naive": "Son değer + sabit pay", "rf": "Random Forest + sabit pay",
+           "lin": "Doğrusal AR + sabit pay", "linq": "Doğrusal AR + koşullu pay (CQR)",
+           "lstm": "LSTM + sabit pay"}
 INK, INK2, GRID, SURF = "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
 
 
@@ -166,13 +177,7 @@ def plot(res: Dict, methods: List[str], path: str, n_seeds: int, days: float):
         ax.plot(x, y, color=COLORS[m], lw=2, zorder=3, label=LABELS[m])
         ax.scatter(x, y, s=34, marker=MARKERS[m], color=COLORS[m], edgecolor=SURF,
                    linewidth=1.5, zorder=4)
-        # seçici doğrudan etiketler: eğrilerin birbirinden ayrıldığı noktalarda
-        q_lbl, off, ha = {"naive": (0.90, (9, -3), "left"),
-                          "lstm":  (0.85, (9, 2), "left"),
-                          "rf":    (0.95, (-8, -12), "right")}[m]
-        i = QUANTILES.index(q_lbl)
-        ax.annotate(LABELS[m], (x[i], y[i]), xytext=off, textcoords="offset points",
-                    fontsize=8.5, color=INK2, ha=ha, va="center")
+        # 4+ seri: kimlik lejant + işaretçi biçimiyle taşınır (doğrudan etiketler çakışıyordu)
 
     ax.scatter([0.0], [ref["reactive_sla_pct"]], s=70, marker="D", color=INK, zorder=5)
     ax.annotate("Reaktif (HPA benzeri)", (0.0, ref["reactive_sla_pct"]), xytext=(8, 0),
@@ -187,7 +192,7 @@ def plot(res: Dict, methods: List[str], path: str, n_seeds: int, days: float):
     ax.set_title("Güvenlik payı taraması: SLA–enerji dengesi (sol-alt daha iyi)",
                  color=INK, fontsize=11, loc="left", pad=12)
     ax.text(0.0, 1.01, f"{n_seeds} seed × {days:g} gün ortalaması · greedy seçici · "
-            f"pay = doğrulama hatasının q kantili (q=0.50…0.99)",
+            f"sabit pay = doğrulama hatasının q kantili · koşullu pay = τ kantil modeli (q, τ = 0.50…0.99)",
             transform=ax.transAxes, fontsize=8, color=INK2)
     ax.grid(True, color=GRID, lw=0.8); ax.set_axisbelow(True)
     for sp in ("top", "right"):
@@ -204,18 +209,31 @@ def plot(res: Dict, methods: List[str], path: str, n_seeds: int, days: float):
     plt.close(fig)
 
 
+def config_hash(train_days: float = 30.0) -> str:
+    """Deney yapılandırmasının özeti — test koşusundan önce dondurulduğunu belgelemek için."""
+    import hashlib
+    cfg = {k: getattr(ep, k) for k in ["DT_SECONDS", "DEMAND_SCALE", "REGIME_MEAN_TICKS",
+                                       "EMA_ALPHA", "BOOT_TICKS", "SCALE_IN_STAB_TICKS",
+                                       "TARGET_UTIL", "SLA_UTIL", "FAIL_PROB_PER_TICK",
+                                       "N_LAGS", "HORIZON", "COND_TAUS", "HGB_PARAMS"]}
+    cfg.update(QUANTILES=QUANTILES, ENERGY_LEVELS=ENERGY_LEVELS, SLA_LEVELS=SLA_LEVELS,
+               train_days=train_days, state_feats="level,d1,d2,surprise,|surprise|,surprise1,|surprise1|",
+               cqr_split="0-70/70-80/80-100")
+    return hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).hexdigest()[:16]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, default=30)
     ap.add_argument("--days", type=float, default=7.0)
     ap.add_argument("--train-days", type=float, default=30.0)
-    ap.add_argument("--no-lstm", action="store_true")
+    ap.add_argument("--with-lstm", action="store_true", help="LSTM'i de tara (G2'de naive'den kötü çıktı)")
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 1)
     ap.add_argument("--out", type=str, default="logs/pareto_margin")
     args = ap.parse_args()
 
     print("Tahminciler eğitiliyor (eğitim seed=1000)…")
-    forecasters = ep.train_forecasters(1000, args.train_days, not args.no_lstm,
+    forecasters = ep.train_forecasters(1000, args.train_days, args.with_lstm,
                                        len(create_server_fleet()))
     methods = [f.name for f in forecasters]
     seeds = [2001 + i for i in range(args.seeds)]
@@ -226,22 +244,20 @@ def main():
 
     res = analyse(per_seed, methods)
 
-    print("\nEŞ ENERJİDE SLA ihlali (%), yöntem − naive farkı [%95 GA]:")
-    for lvl, row in res["iso_energy"].items():
-        line = f"  ΔE=+{float(lvl):>4.1f}% | " + " ".join(
-            f"{m}={row[m]:.2f}" if row[m] is not None else f"{m}=—" for m in methods)
-        for m, d in row["diff_vs_naive"].items():
-            if d["mean"] is not None:
-                line += f" | {m}−naive={d['mean']:+.2f} [{d['ci95'][0]:+.2f},{d['ci95'][1]:+.2f}] (n={d['n']})"
-        print(line)
-    print("\nEŞ SLA'DA gereken ek enerji (%), yöntem − naive farkı [%95 GA]:")
-    for lvl, row in res["iso_sla"].items():
-        line = f"  SLA={float(lvl):>4.2f}% | " + " ".join(
-            f"{m}={row[m]:+.2f}" if row[m] is not None else f"{m}=—" for m in methods)
-        for m, d in row["diff_vs_naive"].items():
-            if d["mean"] is not None:
-                line += f" | {m}−naive={d['mean']:+.2f} [{d['ci95'][0]:+.2f},{d['ci95'][1]:+.2f}] (n={d['n']})"
-        print(line)
+    def _fmt(d):
+        return (f"{d['mean']:+.2f} [{d['ci95'][0]:+.2f},{d['ci95'][1]:+.2f}] n={d['n']}"
+                if d["mean"] is not None else f"— (n={d['n']})")
+
+    for title, key, unit in [("EŞ ENERJİDE SLA ihlali (%)", "iso_energy", "ΔE=+{:.1f}%"),
+                             ("EŞ SLA'DA gereken ek enerji (%)", "iso_sla", "SLA={:.2f}%")]:
+        print(f"\n{title} — ortak seed ortalaması; farklar eşleştirilmiş [%95 GA]:")
+        for lvl, row in res[key].items():
+            vals = " ".join(f"{m}={row[m]:.2f}" if row[m] is not None else f"{m}=—" for m in methods)
+            print(f"  {unit.format(float(lvl)):<11} | {vals}")
+            for base in BASELINES:
+                diffs = "  ".join(f"{m}−{base}={_fmt(d)}" for m, d in row[f"diff_vs_{base}"].items()
+                                  if m not in BASELINES or base == "naive")
+                print(f"  {'':<11}   {diffs}")
     r = res["reference"]
     print(f"\nReferans: reaktif SLA={r['reactive_sla_pct']:.2f}% | oracle SLA="
           f"{r['oracle_sla_pct']:.2f}% @ ΔE=+{r['oracle_delta_energy_pct']:.2f}%")
@@ -251,7 +267,8 @@ def main():
         json.dump({"schema_version": 1,
                    "config": {"seeds": seeds, "days": args.days, "quantiles": QUANTILES,
                               "energy_levels": ENERGY_LEVELS, "sla_levels": SLA_LEVELS,
-                              "selector": "greedy", "train_seed": 1000},
+                              "selector": "greedy", "train_seed": 1000,
+                              "baselines": BASELINES, "config_sha256": config_hash(args.train_days)},
                    "forecasters": {f.name: f.val_metrics for f in forecasters},
                    "analysis": res, "per_seed": per_seed}, fh, indent=2, ensure_ascii=False)
     plot(res, methods, args.out + ".png", len(seeds), args.days)
