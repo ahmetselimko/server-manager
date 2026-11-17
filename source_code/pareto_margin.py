@@ -122,7 +122,7 @@ def analyse(per_seed: List[Dict], methods: List[str]) -> Dict:
         row = {m: (float(v[both].mean()) if both.any() else None) for m, v in vals.items()}
         row["n_seeds_common"] = int(both.sum())
         row["n_censored"] = {m: int((~np.isfinite(v)).sum()) for m, v in vals.items()}
-        for base in BASELINES:
+        for base in [b for b in BASELINES if b in methods]:
             row[f"diff_vs_{base}"] = {m: _paired(vals[m], vals[base], rng)
                                       for m in methods if m != base}
         iso_energy[str(lvl)] = row
@@ -135,7 +135,7 @@ def analyse(per_seed: List[Dict], methods: List[str]) -> Dict:
         row = {m: (float(v[both].mean()) if both.any() else None) for m, v in vals.items()}
         row["n_seeds_common"] = int(both.sum())
         row["n_censored"] = {m: int((~np.isfinite(v)).sum()) for m, v in vals.items()}
-        for base in BASELINES:
+        for base in [b for b in BASELINES if b in methods]:
             row[f"diff_vs_{base}"] = {m: _paired(vals[m], vals[base], rng)
                                       for m in methods if m != base}
         iso_sla[str(lvl)] = row
@@ -162,7 +162,9 @@ LABELS  = {"naive": "Son değer + sabit pay", "rf": "Random Forest + sabit pay",
 INK, INK2, GRID, SURF = "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
 
 
-def plot(res: Dict, methods: List[str], path: str, n_seeds: int, days: float):
+def plot(res: Dict, methods: List[str], path: str, n_seeds: int, days: float,
+         title: str = "Güvenlik payı taraması: SLA–enerji dengesi (sol-alt daha iyi)",
+         subtitle: str = ""):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -189,9 +191,8 @@ def plot(res: Dict, methods: List[str], path: str, n_seeds: int, days: float):
 
     ax.set_xlabel("Ek enerji, reaktif baseline'a göre (%)", color=INK2, fontsize=9.5)
     ax.set_ylabel("SLA ihlali (tick'lerin %'si)", color=INK2, fontsize=9.5)
-    ax.set_title("Güvenlik payı taraması: SLA–enerji dengesi (sol-alt daha iyi)",
-                 color=INK, fontsize=11, loc="left", pad=12)
-    ax.text(0.0, 1.01, f"{n_seeds} seed × {days:g} gün ortalaması · greedy seçici · "
+    ax.set_title(title, color=INK, fontsize=11, loc="left", pad=12)
+    ax.text(0.0, 1.01, subtitle or f"{n_seeds} seed × {days:g} gün ortalaması · greedy seçici · "
             f"sabit pay = doğrulama hatasının q kantili · koşullu pay = τ kantil modeli (q, τ = 0.50…0.99)",
             transform=ax.transAxes, fontsize=8, color=INK2)
     ax.grid(True, color=GRID, lw=0.8); ax.set_axisbelow(True)

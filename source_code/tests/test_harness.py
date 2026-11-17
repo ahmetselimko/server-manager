@@ -280,3 +280,32 @@ def test_coverage_close_to_target():
     f = fs["linq"]
     for tau in (0.8, 0.9, 0.95):
         assert f.coverage[tau] >= tau - 0.03
+
+
+# ── G5/G6: gerçek iz (Azure) yardımcıları ─────────────────────────────────────
+
+def test_trace_from_series_deterministic_and_shapes():
+    x = np.linspace(0.1, 0.9, 500)
+    a = ep.trace_from_series(x, None, N_SRV, failure_seed=7)
+    b = ep.trace_from_series(x, None, N_SRV, failure_seed=7)
+    assert a["n"] == 500 and a["failed"].shape == (500, N_SRV)
+    assert np.array_equal(a["failed"], b["failed"]) and np.array_equal(a["load"], x)
+    assert (a["wl"] == 0).all()
+    r = ep.simulate("observed_greedy", a)
+    assert r["served_total"] + r["dropped_total"] == pytest.approx(r["demand_total"], rel=1e-9)
+
+
+def test_azure_fleets_disjoint_and_train_only_scaling():
+    import azure_eval as az
+    rng = np.random.default_rng(0)
+    D = rng.random((300, 8640)).astype(np.float32) + 0.1
+    D[:50, :1000] = 0.0                                # aktif olmayanlar aday olmamalı
+    fleets, n_cand = az.build_fleets(D, 5, 10)
+    allsubs = np.concatenate(fleets)
+    assert len(np.unique(allsubs)) == len(allsubs)      # ayrık
+    assert not np.isin(np.arange(50), allsubs).any()
+    # ölçek yalnızca eğitim döneminden: test dönemine dev bir sıçrama ölçeği değiştirmemeli
+    D2 = D.copy(); D2[fleets[0], -10:] = 1e6
+    s1 = az.fleet_series(D, fleets[0])[3]; s2 = az.fleet_series(D2, fleets[0])[3]
+    assert s1 == pytest.approx(s2)
+    assert az.fleet_series(D2, fleets[0])[1].max() <= az.X_CLIP

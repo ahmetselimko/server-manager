@@ -3,3 +3,4 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 ~$*
+source_code/data/azure_sub_demand.npz

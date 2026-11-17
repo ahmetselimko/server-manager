@@ -304,10 +304,38 @@ COND_TAUS = [0.50, 0.60, 0.70, 0.80, 0.85, 0.90, 0.95, 0.975, 0.99]
 
 def train_forecasters(train_seed: int, train_days: float, use_lstm: bool,
                       n_servers: int, use_rf: bool = True) -> List[Forecaster]:
+    """Sentetik eğitim izi üretip tahmincileri eğitir (bkz. train_forecasters_on)."""
     tr = generate_trace(train_seed, train_days, n_servers)
-    load, wl = tr["load"], tr["wl"]
-    split = int(len(load) * 0.8)
+    return train_forecasters_on(tr["load"], tr["wl"], use_lstm, use_rf)
+
+
+def trace_from_series(load: np.ndarray, wl: Optional[np.ndarray], n_servers: int,
+                      failure_seed: int) -> Dict:
+    """Dış bir talep dizisinden (ör. Azure) simülasyon izi kurar. Arıza takvimi
+    generate_trace ile aynı süreçle, verilen seed'den üretilir."""
+    load = np.asarray(load, dtype=float)
+    n = len(load)
+    wl = np.zeros(n, dtype=int) if wl is None else np.asarray(wl, dtype=int)
+    rng = np.random.default_rng(failure_seed + 7919)
+    failed = np.zeros((n, n_servers), dtype=bool)
+    for i in range(n_servers):
+        k = 0
+        while k < n:
+            if rng.random() < FAIL_PROB_PER_TICK:
+                dur = int(rng.integers(FAIL_MIN_TICKS, FAIL_MAX_TICKS + 1))
+                failed[k:k + dur, i] = True
+                k += dur
+            else:
+                k += 1
+    return {"load": load, "wl": wl, "failed": failed, "n": n}
+
+
+def train_forecasters_on(load: np.ndarray, wl: np.ndarray, use_lstm: bool,
+                         use_rf: bool = True, verbose: bool = True) -> List[Forecaster]:
+    """Verilen eğitim dizisinde (zaman sıralı %0-80 eğitim / %80-100 doğrulama)
+    tüm tahmincileri eğitir ve kalibre eder."""
     out: List[Forecaster] = []
+    _print = print if verbose else (lambda *a, **k: None)
 
     # Naive (son değer) — referans tahminci
     X, y, _ = build_tabular(load, wl)
@@ -322,7 +350,7 @@ def train_forecasters(train_seed: int, train_days: float, use_lstm: bool,
         rf.fit(X[:cut], y[:cut])
         f_rf = Forecaster("rf", rf, "rf")
         f_rf.calibrate(y[cut:], rf.predict(X[cut:]))
-        print(f"  RF   eğitildi ({time.time()-t0:.0f}s) | val MAE={f_rf.val_metrics['mae']:.4f} "
+        _print(f"  RF   eğitildi ({time.time()-t0:.0f}s) | val MAE={f_rf.val_metrics['mae']:.4f} "
               f"R²={f_rf.val_metrics['r2']:.3f} | naive MAE={f_naive.val_metrics['mae']:.4f} "
               f"| pay(q90)={f_rf.margin:.4f}")
         out.append(f_rf)
@@ -333,7 +361,7 @@ def train_forecasters(train_seed: int, train_days: float, use_lstm: bool,
     f_lin = Forecaster("lin", lin, "tab")
     f_lin.calibrate(y[cut:], lin.predict(X[cut:]))
     out.append(f_lin)
-    print(f"  LIN  eğitildi ({time.time()-t0:.1f}s) | val MAE={f_lin.val_metrics['mae']:.4f} "
+    _print(f"  LIN  eğitildi ({time.time()-t0:.1f}s) | val MAE={f_lin.val_metrics['mae']:.4f} "
           f"R²={f_lin.val_metrics['r2']:.3f} | pay(q90)={f_lin.margin:.4f}")
 
     # G3-2: LIN + duruma koşullu kantil payı
@@ -353,7 +381,7 @@ def train_forecasters(train_seed: int, train_days: float, use_lstm: bool,
     f_q.set_level(0.90)
     out.append(f_q)
     cov = " ".join(f"{t:g}:{f_q.coverage_raw[t]:.3f}→{c:.3f}" for t, c in f_q.coverage.items())
-    print(f"  LINQ eğitildi ({time.time()-t0:.0f}s) | AR(2)=({ar2[0]:.3f},{ar2[1]:.3f}) "
+    _print(f"  LINQ eğitildi ({time.time()-t0:.0f}s) | AR(2)=({ar2[0]:.3f},{ar2[1]:.3f}) "
           f"| val kapsama τ→oran: {cov}")
 
     for f in out:
@@ -373,7 +401,7 @@ def train_forecasters(train_seed: int, train_days: float, use_lstm: bool,
         lstm.fit(Xs[sub], ys[sub], epochs=8, batch_size=32, verbose=False)
         f_lstm = Forecaster("lstm", lstm, "lstm", seq_len)
         f_lstm.calibrate(ys[cut_s:], np.ravel(lstm.predict(Xs[cut_s:])))
-        print(f"  LSTM eğitildi ({time.time()-t0:.0f}s) | val MAE={f_lstm.val_metrics['mae']:.4f} "
+        _print(f"  LSTM eğitildi ({time.time()-t0:.0f}s) | val MAE={f_lstm.val_metrics['mae']:.4f} "
               f"R²={f_lstm.val_metrics['r2']:.3f} | pay(q90)={f_lstm.margin:.4f}")
         out.append(f_lstm)
     return out

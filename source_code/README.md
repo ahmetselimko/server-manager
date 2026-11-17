@@ -39,7 +39,7 @@ Each policy runs with two server selectors: a greedy rps/W selector and the orig
 ```bash
 python evaluate_policies.py        # main comparison  -> logs/policy_comparison.json   (~4 min)
 python pareto_margin.py            # margin sweep / SLA–energy Pareto -> logs/pareto_margin.{json,png} (~10 min, 2 cores)
-python -m pytest tests -q          # 33 correctness tests (demand conservation, boot delay, no look-ahead, coverage, ...)
+python -m pytest tests -q          # 35 correctness tests (demand conservation, boot delay, no look-ahead, coverage, ...)
 ```
 
 **Forecasting + safety-margin methods**
@@ -74,10 +74,37 @@ python -m pytest tests -q          # 33 correctness tests (demand conservation, 
 
 ![SLA–energy Pareto](logs/pareto_margin.png)
 
+### Real-trace validation: Azure Public Dataset V2 (2019 VM trace)
+
+**Data and protocol**
+- **Trace size:** 30 days, 2.7 M VMs, 1.94 B five-minute CPU readings. All rows were processed; the row count matches the dataset documentation exactly.
+- **Demand:** aggregated per subscription as used cores = Σ avg CPU × cores.
+- **Fleets:** 30 disjoint fleets, each made of 20 random subscriptions.
+- **Train/test split:** each fleet is trained only on its own days 0–20 and tested on days 21–29, with the same hyperparameters as the synthetic study.
+
+```bash
+cd data_prep && ./download_and_aggregate.sh   # see header: streams ~156 GB, keeps a 168 MB matrix
+python azure_eval.py                         # -> logs/azure_pareto.{json,png}
+```
+
+**Results** (paired 95% CIs over fleets; mean SLA over the common +0–10% energy range)
+
+| Comparison | Δ SLA (pts) | 95% CI | Fleets won |
+|---|---|---|---|
+| `linq` vs `naive` | −0.17 (0.59 → 0.42) | [−0.35, −0.03] | 17/27 (6 ties) |
+| `linq` vs `lin` (value of the conditional margin) | −0.08 | [−0.16, −0.02] | 16/27 |
+| `linq` vs `rf` | −0.28 (0.70 → 0.42) | [−0.81, +0.05] | 14/27 (6 ties) |
+
+**Honest summary**
+- **Consistent finding:** on real Azure workloads, the conditional (CQR) safety margin reduces SLA violations significantly compared with fixed-margin methods.
+- **Limits of the finding:** most real fleets were smooth and left little room for improvement; only 8 of 30 had ≥0.5% violations under reactive scaling. Against Random Forest the advantage is directional (−40% on average) but not statistically conclusive.
+
+![Azure SLA–energy Pareto](logs/azure_pareto.png)
+
 *Caveats:*
 - The traffic generator re-draws its pattern every tick, so the harness holds regimes for about 1 hour and adds EMA inertia.
 - Part of the conditional margin's advantage comes from regularities in the synthetic generator: switch probability varies by hour, and upward jump size depends on load level.
-- Validation on a public cloud trace (Azure VM traces) is the next step.
+- Real fleets in the Azure trace are concentrated: the largest subscription contributes a median 51% of a fleet's demand.
 
 ## Project Structure
 
@@ -89,6 +116,8 @@ logs/       Training and evaluation result JSON files
 tests/      Correctness tests for the evaluation harness
 train.py    Model training pipeline (per-server RF / LSTM / GraphSAGE)
 evaluate_policies.py  Ground-truth policy comparison harness (v2)
+azure_eval.py         Real-trace validation on the Azure 2019 VM trace
+data_prep/            Streaming download + aggregation of the Azure trace
 pareto_margin.py      Safety-margin sweep and SLA–energy Pareto analysis
 ```
 
