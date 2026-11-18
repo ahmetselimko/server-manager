@@ -39,7 +39,7 @@ Each policy runs with two server selectors: a greedy rps/W selector and the orig
 ```bash
 python evaluate_policies.py        # main comparison  -> logs/policy_comparison.json   (~4 min)
 python pareto_margin.py            # margin sweep / SLA–energy Pareto -> logs/pareto_margin.{json,png} (~10 min, 2 cores)
-python -m pytest tests -q          # 35 correctness tests (demand conservation, boot delay, no look-ahead, coverage, ...)
+python -m pytest tests -q          # 37 correctness tests (demand conservation, boot delay, no look-ahead, coverage, ...)
 ```
 
 **Forecasting + safety-margin methods**
@@ -101,6 +101,22 @@ python azure_eval.py                         # -> logs/azure_pareto.{json,png}
 
 ![Azure SLA–energy Pareto](logs/azure_pareto.png)
 
+### Pre-registered fleet-size analysis (K = 5 / 20 / 80 subscriptions per fleet)
+
+The analysis plan was committed **before** the runs ([`docs/preregistration_fleet_size.md`](docs/preregistration_fleet_size.md)); full results are in [`docs/results_fleet_size.md`](docs/results_fleet_size.md).
+
+| K | `linq` vs `naive` | `linq` vs `rf` |
+|---|---|---|
+| 5 | **−31%** [CI excludes 0] | **−23%** [CI excludes 0] |
+| 20 | **−29%** [CI excludes 0] | −40% [CI includes 0] |
+| 80 | **−43%** [CI excludes 0] | −4% [CI includes 0] |
+
+- **H1 (`linq` beats `naive` at every fleet size): supported.**
+- **H2 (the absolute gain grows with fleet difficulty): supported**, Spearman ρ = −0.62, p = 0.0001.
+- **Caveat on H2:** an exploratory check on the *relative* gain gives a weaker, non-significant trend (ρ = −0.19, p = 0.095). The median relative reduction is −18%.
+
+![Fleet-size analysis](logs/fleet_size_analysis.png)
+
 *Caveats:*
 - The traffic generator re-draws its pattern every tick, so the harness holds regimes for about 1 hour and adds EMA inertia.
 - Part of the conditional margin's advantage comes from regularities in the synthetic generator: switch probability varies by hour, and upward jump size depends on load level.
@@ -117,6 +133,8 @@ tests/      Correctness tests for the evaluation harness
 train.py    Model training pipeline (per-server RF / LSTM / GraphSAGE)
 evaluate_policies.py  Ground-truth policy comparison harness (v2)
 azure_eval.py         Real-trace validation on the Azure 2019 VM trace
+fleet_size_analysis.py  Pre-registered fleet-size analysis (docs/preregistration_fleet_size.md)
+docs/                 Pre-registration and results reports
 data_prep/            Streaming download + aggregation of the Azure trace
 pareto_margin.py      Safety-margin sweep and SLA–energy Pareto analysis
 ```

@@ -309,3 +309,28 @@ def test_azure_fleets_disjoint_and_train_only_scaling():
     s1 = az.fleet_series(D, fleets[0])[3]; s2 = az.fleet_series(D2, fleets[0])[3]
     assert s1 == pytest.approx(s2)
     assert az.fleet_series(D2, fleets[0])[1].max() <= az.X_CLIP
+
+
+# ── Ön kayıtlı filo büyüklüğü analizi ─────────────────────────────────────────
+
+def _fake_fleet(curves, react_e=100.0, react_sla=1.0):
+    return {"reactive": {"energy_kwh": react_e, "sla_violation_pct": react_sla},
+            "curves": {m: [{"energy_kwh": react_e * (1 + e / 100), "sla_violation_pct": s}
+                           for e, s in pts] for m, pts in curves.items()}}
+
+
+def test_mean_sla_pair_common_range():
+    import fleet_size_analysis as fsa
+    f = _fake_fleet({"a": [(0, 1.0), (10, 0.0)], "b": [(2, 2.0), (20, 0.0)]})
+    va, vb = fsa.mean_sla_pair(f, "a", "b")       # ortak aralık [2, 10]
+    assert va == pytest.approx(0.4, abs=1e-3)       # a: 0.8→0.0 ortalaması
+    # b: (2, 2.0)→(20, 0.0) eğimi −1/9; [2,10] aralığında 2.0→2.0−8/9, ortalaması 2.0−4/9
+    assert vb == pytest.approx(2.0 - 4.0 / 9.0, abs=1e-3)
+    g = _fake_fleet({"a": [(0, 1.0), (0.3, 0.0)], "b": [(0, 1.0), (10, 0.0)]})
+    assert fsa.mean_sla_pair(g, "a", "b") is None   # ortak aralık < 0.5 puan → dışla
+
+
+def test_spearman_matches_ranks():
+    import fleet_size_analysis as fsa
+    x = np.array([1.0, 2.0, 3.0, 4.0]); assert fsa.spearman(x, -x ** 3) == pytest.approx(-1.0)
+    assert fsa.spearman(x, x ** 2) == pytest.approx(1.0)
