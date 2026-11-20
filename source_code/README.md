@@ -39,7 +39,7 @@ Each policy runs with two server selectors: a greedy rps/W selector and the orig
 ```bash
 python evaluate_policies.py        # main comparison  -> logs/policy_comparison.json   (~4 min)
 python pareto_margin.py            # margin sweep / SLA–energy Pareto -> logs/pareto_margin.{json,png} (~10 min, 2 cores)
-python -m pytest tests -q          # 37 correctness tests (demand conservation, boot delay, no look-ahead, coverage, ...)
+python -m pytest tests -q          # 41 correctness tests (demand conservation, boot delay, no look-ahead, coverage, ...)
 ```
 
 **Forecasting + safety-margin methods**
@@ -117,6 +117,31 @@ The analysis plan was committed **before** the runs ([`docs/preregistration_flee
 
 ![Fleet-size analysis](logs/fleet_size_analysis.png)
 
+### Server-set selector (G4): an energy- and churn-aware optimiser, negative result
+
+`core/energy_selector.py` (`eopt`) chooses the set of servers to keep on.
+
+**What it optimises**
+- **Objective:** expected power under the real power model (idle + dyn·ρ^1.4), plus a wake-up penalty.
+- **Constraint:** capacity ≥ demand / 0.70.
+
+**How it solves it**
+- **Exact (n ≤ 12):** a vectorised enumeration that matches a brute-force reference.
+- **Larger fleets:** a multi-start local search that hits the exact optimum in 397 of 400 random instances. Its 95th-percentile decision time is 28 ms at 100 servers.
+
+**Acceptance test** (`g4_selector_eval.py`): λ tuned on the training seed only; 30 test seeds; forecast source `linq`.
+
+| Selector | Δ energy vs greedy [95% CI] | Wake-ups |
+|---|---|---|
+| greedy (rps/W order) | 0 | 154 |
+| `eopt` | +1.41% [+1.34, +1.48] | 306 |
+| original combinatorial optimiser | +14.6% [+14.2, +15.1] | 758 |
+
+**Result: rejected, greedy stays.**
+- **Why:** on this fleet the efficiency order is already near energy-optimal. Even with no switching at all, the optimal set saves only 0.6% on average. Switching between different optimal sets costs more than that, because of the extra boots and the stabilisation window.
+- **The original optimiser explained:** its 14.6% loss came from an objective that was not energy and from ignoring switching costs.
+- **Takeaway:** the gains in this project come from forecasting and the safety margin, not from set selection.
+
 *Caveats:*
 - The traffic generator re-draws its pattern every tick, so the harness holds regimes for about 1 hour and adds EMA inertia.
 - Part of the conditional margin's advantage comes from regularities in the synthetic generator: switch probability varies by hour, and upward jump size depends on load level.
@@ -134,6 +159,7 @@ train.py    Model training pipeline (per-server RF / LSTM / GraphSAGE)
 evaluate_policies.py  Ground-truth policy comparison harness (v2)
 azure_eval.py         Real-trace validation on the Azure 2019 VM trace
 fleet_size_analysis.py  Pre-registered fleet-size analysis (docs/preregistration_fleet_size.md)
+g4_selector_eval.py   Acceptance test for the energy/churn-aware selector (core/energy_selector.py)
 docs/                 Pre-registration and results reports
 data_prep/            Streaming download + aggregation of the Azure trace
 pareto_margin.py      Safety-margin sweep and SLA–energy Pareto analysis

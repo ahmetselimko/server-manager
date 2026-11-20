@@ -50,6 +50,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from core.autoscaler import AutoscalerEngine, TARGET_UTIL_PCT
+from core.energy_selector import select_energy
 from core.server_profiles import create_server_fleet
 from core.traffic_generator import TrafficGenerator, WORKLOAD_CLASSES
 from models.models import RandomForestRegressor, LSTMModel
@@ -69,6 +70,7 @@ FAIL_MAX_TICKS      = 24
 MIN_ACTIVE          = 2
 N_LAGS              = 12
 HORIZON             = 1 + BOOT_TICKS   # t+1 … t+1+BOOT talebini karşılamak gerekir
+EOPT_LAMBDA         = 2.0       # G4 uyandırma cezası (boşta güç katı); select_lambda.py ile eğitim seed'inde seçilir
 WL_INDEX            = {w: i for i, w in enumerate(WORKLOAD_CLASSES)}
 
 
@@ -514,16 +516,23 @@ def simulate(policy: str, trace: Dict, forecaster: Optional[Forecaster] = None,
         else:
             source, selector = policy.rsplit("_", 1)      # ör. "rf_greedy"
             if source == "observed":
-                req = d
+                req = exp_d = d
             elif source == "oracle":
                 fut = demand[k + 1:k + 1 + HORIZON]
                 req = float(fut.max()) if len(fut) else d
+                exp_d = float(demand[k + 1]) if k + 1 < n else d
             else:
-                x_hat = (forecaster.predict_at(load, wl, k)
-                         + forecaster.margin_now(load, wl, k))
-                req = max(x_hat, 0.0) * DEMAND_SCALE * cap_total
-            target = (select_greedy(avail, req) if selector == "greedy"
-                      else select_optimal(avail, req, dom_wl))
+                point = forecaster.predict_at(load, wl, k)
+                req = max(point + forecaster.margin_now(load, wl, k), 0.0) * DEMAND_SCALE * cap_total
+                exp_d = max(point, 0.0) * DEMAND_SCALE * cap_total
+            if selector == "greedy":
+                target = select_greedy(avail, req)
+            elif selector == "eopt":
+                # G4: enerji + geçiş maliyeti (beklenen talep exp_d ile güç; req ile kapasite kısıtı)
+                target = select_energy(avail, req, exp_d, set(powered), EOPT_LAMBDA,
+                                       TARGET_UTIL, MIN_ACTIVE)
+            else:
+                target = select_optimal(avail, req, dom_wl)
 
         target_ids = {s.server_id for s in target}
         cur_ids    = set(powered)

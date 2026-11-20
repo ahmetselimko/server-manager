@@ -334,3 +334,72 @@ def test_spearman_matches_ranks():
     import fleet_size_analysis as fsa
     x = np.array([1.0, 2.0, 3.0, 4.0]); assert fsa.spearman(x, -x ** 3) == pytest.approx(-1.0)
     assert fsa.spearman(x, x ** 2) == pytest.approx(1.0)
+
+
+# ── G4: enerji / geçiş duyarlı seçici ─────────────────────────────────────────
+
+def _brute_force(avail, req, exp, on, lam, tu=0.7, ma=2):
+    """Bağımsız referans: itertools ile tüm alt kümeler, sunucunun kendi güç fonksiyonuyla."""
+    import itertools
+    best, best_f = None, np.inf
+    for r in range(ma, len(avail) + 1):
+        for S in itertools.combinations(avail, r):
+            c = sum(s.max_requests_per_sec for s in S)
+            if c < req / tu - 1e-9:
+                continue
+            rho = min(1.0, exp / c); f = 0.0
+            for s in S:
+                s.current_cpu_pct, s.current_temp_c = rho * 100, 40.0
+                f += s.compute_power_draw() + (0 if s.server_id in on else lam * s.idle_power_watts)
+            if f < best_f:
+                best, best_f = S, f
+    if best is None:
+        return None, None                              # uygun küme yok (kapasite yetersiz)
+    return {s.server_id for s in best}, best_f
+
+
+def test_energy_selector_exact_matches_brute_force():
+    from core import energy_selector as es
+    fleet = create_server_fleet(); cap = sum(s.max_requests_per_sec for s in fleet)
+    rng = np.random.default_rng(5)
+    for _ in range(15):
+        avail = [s for s in fleet if rng.random() > 0.15]
+        req = rng.uniform(0.05, 0.7) * cap * 0.7; exp = req * rng.uniform(0.6, 1.0)
+        on = {s.server_id for s in avail if rng.random() < 0.4}; lam = float(rng.choice([0, 2, 5]))
+        got = es.select_energy(avail, req, exp, on, lam, 0.7, 2, solver="exact")
+        ref_ids, ref_f = _brute_force(avail, req, exp, on, lam)
+        if ref_ids is None:                            # kapasite yetersiz → seçici hepsini açmalı
+            assert len(got) == len(avail)
+            continue
+        cap_a, idle, dyn = es._arrays(avail)
+        mask = np.array([[1.0 if s in got else 0.0 for s in avail]])
+        w = lam * idle * np.array([s.server_id not in on for s in avail])
+        assert es.objective(mask, cap_a, idle, dyn, exp, w)[0] == pytest.approx(ref_f, rel=1e-9)
+
+
+def test_energy_selector_feasible_and_local_close():
+    from core import energy_selector as es
+    fleet = create_server_fleet(); cap = sum(s.max_requests_per_sec for s in fleet)
+    rng = np.random.default_rng(9); gaps = []
+    for _ in range(60):
+        req = rng.uniform(0.05, 0.8) * cap * 0.7; exp = req * 0.9
+        on = {s.server_id for s in fleet if rng.random() < 0.4}
+        for solver in ("exact", "local"):
+            S = es.select_energy(fleet, req, exp, on, 1.0, 0.7, 2, solver=solver)
+            assert sum(s.max_requests_per_sec for s in S) >= req / 0.7 - 1e-6 and len(S) >= 2
+        cap_a, idle, dyn = es._arrays(fleet); w = idle * np.array([s.server_id not in on for s in fleet])
+        f = lambda S: es.objective(np.array([[1.0 if s in S else 0.0 for s in fleet]]), cap_a, idle, dyn, exp, w)[0]
+        gaps.append(f(es.select_energy(fleet, req, exp, on, 1.0, 0.7, 2, solver="local")) /
+                    f(es.select_energy(fleet, req, exp, on, 1.0, 0.7, 2, solver="exact")) - 1)
+    assert np.mean(gaps) < 0.005                       # yerel arama ortalamada %0.5 içinde
+
+
+def test_energy_selector_infeasible_returns_all():
+    from core import energy_selector as es
+    fleet = create_server_fleet(); cap = sum(s.max_requests_per_sec for s in fleet)
+    assert len(es.select_energy(fleet, cap * 2, cap, set(), 0.0, 0.7, 2)) == len(fleet)
+
+
+def test_eopt_policy_conserves_demand(trace):
+    r = ep.simulate("observed_eopt", trace)
+    assert r["served_total"] + r["dropped_total"] == pytest.approx(r["demand_total"], rel=1e-9)
