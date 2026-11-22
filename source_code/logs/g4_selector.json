@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "source": "linq",
+  "level": 0.9,
+  "lambda": 0,
+  "lambda_selection_train_seed_1000": [
+    {
+      "lambda": 0,
+      "delta_energy_pct": 1.1254886338968983,
+      "wakeups": 276,
+      "sla": 0.5456349206349206
+    },
+    {
+      "lambda": 2,
+      "delta_energy_pct": 1.281413748756055,
+      "wakeups": 203,
+      "sla": 0.5456349206349206
+    },
+    {
+      "lambda": 5,
+      "delta_energy_pct": 4.162998922607031,
+      "wakeups": 227,
+      "sla": 0.5952380952380952
+    },
+    {
+      "lambda": 10,
+      "delta_energy_pct": 4.339994846702888,
+      "wakeups": 232,
+      "sla": 0.5952380952380952
+    },
+    {
+      "lambda": 20,
+      "delta_energy_pct": 6.480826615084068,
+      "wakeups": 232,
+      "sla": 0.5952380952380952
+    },
+    {
+      "lambda": 50,
+      "delta_energy_pct": 6.543075972185575,
+      "wakeups": 231,
+      "sla": 0.5952380952380952
+    }
+  ],
+  "seeds": [
+    2001,
+    2002,
+    2003,
+    2004,
+    2005,
+    2006,
+    2007,
+    2008,
+    2009,
+    2010,
+    2011,
+    2012,
+    2013,
+    2014,
+    2015,
+    2016,
+    2017,
+    2018,
+    2019,
+    2020,
+    2021,
+    2022,
+    2023,
+    2024,
+    2025,
+    2026,
+    2027,
+    2028,
+    2029,
+    2030
+  ],
+  "summary": {
+    "greedy": {
+      "energy_kwh": 85.64650084593126,
+      "sla_violation_pct": 1.0201719576719577,
+      "wakeups": 154.13333333333333,
+      "avg_active_servers": 4.000429894179893
+    },
+    "eopt": {
+      "energy_kwh": 86.84993769701178,
+      "sla_violation_pct": 1.1755952380952381,
+      "wakeups": 305.8,
+      "avg_active_servers": 4.250297619047619
+    },
+    "opt": {
+      "energy_kwh": 98.12343744894177,
+      "sla_violation_pct": 1.0400132275132274,
+      "wakeups": 758.0,
+      "avg_active_servers": 5.172354497354498
+    }
+  },
+  "delta_energy_vs_greedy": {
+    "eopt": [
+      1.407938002306907,
+      [
+        1.3394074794070066,
+        1.483350127157021
+      ]
+    ],
+    "opt": [
+      14.62781741949682,
+      [
+        14.190964003585549,
+        15.096050819619744
+      ]
+    ]
+  },
+  "static_bound": {
+    "mean_pct": -0.60636451914031,
+    "min_pct": -5.2700180906773975,
+    "share_better": 0.321
+  },
+  "timing_100_servers": {
+    "median_ms": 13.598510500003158,
+    "p95_ms": 28.10177754997909
+  },
+  "acceptance": {
+    "K1_energy": false,
+    "K2_wakeups": false,
+    "K3_time": true
+  }
+}
